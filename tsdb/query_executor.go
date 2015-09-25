@@ -45,6 +45,10 @@ type QueryExecutor struct {
 	ShardMapper interface {
 		CreateMapper(shard meta.ShardInfo, stmt influxql.Statement, chunkSize int) (Mapper, error)
 	}
+	
+	IntoWriter interface {
+		WritePointsInto(p *IntoWriteRequest) error
+	}
 
 	Logger          *log.Logger
 	QueryLogEnabled bool
@@ -52,6 +56,14 @@ type QueryExecutor struct {
 	// the local data store
 	Store *Store
 }
+
+// partial copy of cluster.WriteRequest
+type IntoWriteRequest struct {
+	Database         string
+	RetentionPolicy  string
+	Points           []models.Point
+}
+
 
 // NewQueryExecutor returns an initialized QueryExecutor
 func NewQueryExecutor(store *Store) *QueryExecutor {
@@ -291,6 +303,28 @@ func (q *QueryExecutor) executeSelectStatement(statementID int, stmt *influxql.S
 	for row := range ch {
 		if row.Err != nil {
 			return row.Err
+		}
+		// this is a into query. Write results back to database
+		if stmt.Target != nil {
+			measurement := intoMeasurement(stmt)
+			intodb, err := intoDB(stmt)
+			if err != nil {
+				panic(err)
+			}
+			rp := intoRP(stmt)
+			points, err := convertRowToPoints(measurement, row)
+			if err != nil {
+				panic(err)
+			}
+			req := &IntoWriteRequest{
+				Database: intodb,
+				RetentionPolicy: rp,
+				Points: points,
+			}
+			err = q.IntoWriter.WritePointsInto(req)
+			if err != nil {
+				panic(err)
+			}
 		}
 		resultSent = true
 		results <- &influxql.Result{StatementID: statementID, Series: []*models.Row{row}}
@@ -663,6 +697,29 @@ func (q *QueryExecutor) executeStatement(statementID int, stmt influxql.Statemen
 	for row := range ch {
 		if row.Err != nil {
 			return row.Err
+		}
+		selectstmt, ok := stmt.(*influxql.SelectStatement)
+		// this is a into query. Write results back to database
+		if ok && selectstmt.Target != nil {
+			measurement := intoMeasurement(selectstmt)
+			intodb, err := intoDB(selectstmt)
+			if err != nil {
+				panic(err)
+			}
+			rp := intoRP(selectstmt)
+			points, err := convertRowToPoints(measurement, row)
+			if err != nil {
+				panic(err)
+			}
+			req := &IntoWriteRequest{
+				Database: intodb,
+				RetentionPolicy: rp,
+				Points: points,
+			}
+			err = q.IntoWriter.WritePointsInto(req)
+			if err != nil {
+				panic(err)
+			}
 		}
 		resultSent = true
 		results <- &influxql.Result{StatementID: statementID, Series: []*models.Row{row}}
